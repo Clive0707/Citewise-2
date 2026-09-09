@@ -1,0 +1,261 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider     = "postgresql"
+  url          = env("DATABASE_URL")
+  relationMode = "prisma"
+}
+
+model CitelabsPage {
+  id        BigInt   @id @default(autoincrement())
+  url       String
+  content   String?
+  aiSummary String?  @map("ai_summary")
+  pageType  String?  @map("page_type")
+  isClient  Boolean  @default(false) @map("is_client")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@map("citelabs_pages")
+}
+
+model PageRecord {
+  id                  String   @id @default(cuid())
+  url                 String   @unique
+  pageType            String?
+  title               String?
+  metaDescription     String?
+  headings            String?
+  mainContent         String?
+  lastModified        String?
+  pagePurposeSummary  String?
+  primaryKeywordGuess String?
+  aiSummary           String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @default(now()) @updatedAt
+}
+
+model SandboxRun {
+  id          String              @id @default(cuid())
+  sandboxUrl  String              @map("sandbox_url")
+  status      String
+  createdAt   DateTime            @default(now()) @map("created_at")
+  updatedAt   DateTime            @default(now()) @updatedAt @map("updated_at")
+  pages       SandboxPage[]
+  questions   SandboxQuestion[]
+  competitors SandboxCompetitor[]
+  ragResults  SandboxRagResult[]
+  scores      SandboxScore?
+  events      JobEvent[]
+  chatSessions ChatSession[]       // Link to chat sessions
+
+  @@map("sandbox_runs")
+}
+
+model SandboxPage {
+  id                 String     @id @default(cuid())
+  runId              String     @map("run_id")
+  url                String
+  title              String?
+  h1                 String?
+  intent             String?
+  pageSummary        String?    @map("page_summary")
+  aiSummary          String?
+  fullText           String?    @map("full_text")
+  isClient           Boolean    @default(true) @map("is_client")
+  createdAt          DateTime   @default(now()) @map("created_at")
+  updatedAt          DateTime   @default(now()) @updatedAt @map("updated_at")
+  sandboxBrandName   String?    @map("sandbox_brand_name")
+  run                SandboxRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@map("sandbox_pages")
+}
+
+model AnswerMetrics {
+  id                      String           @id @default(cuid())
+  answerId                String           @unique @map("answer_id")
+  brandMentionCount       Int              @default(0) @map("brand_mention_count")
+  competitorMentionCount  Int              @default(0) @map("competitor_mention_count")
+  isBrandMentioned        Boolean          @default(false) @map("is_brand_mentioned")
+  isBrandCited            Boolean          @default(false) @map("is_brand_cited")
+  brandCitedFirst         Boolean          @default(false) @map("brand_cited_first")
+  createdAt               DateTime         @default(now()) @map("created_at")
+  answer                  SandboxRagResult @relation(fields: [answerId], references: [id], onDelete: Cascade)
+
+  @@map("answer_metrics")
+}
+
+model SandboxQuestion {
+  id         String             @id @default(cuid())
+  runId      String             @map("run_id")
+  type       String
+  question   String
+  createdAt  DateTime           @default(now()) @map("created_at")
+  run        SandboxRun         @relation(fields: [runId], references: [id], onDelete: Cascade)
+  ragResults SandboxRagResult[]
+
+  @@map("sandbox_questions")
+}
+
+model SandboxCompetitor {
+  id         String     @id @default(cuid())
+  runId      String     @map("run_id")
+  url        String
+  domain     String
+  title      String?
+  h1         String?
+  aiSummary  String?
+  fullText   String?    @map("full_text")
+  sourceType String     @default("competitor") @map("source_type")
+  domainType String?    @default("editorial") @map("domain_type")
+  createdAt  DateTime   @default(now()) @map("created_at")
+  updatedAt  DateTime   @default(now()) @updatedAt @map("updated_at")
+  run        SandboxRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@map("sandbox_competitors")
+}
+
+model SandboxChunk {
+  id         String   @id @default(cuid())
+  runId      String   @map("run_id")
+  url        String
+  chunkId    Int      @map("chunk_id")
+  text       String
+  summary    String?
+  isClient   Boolean  @default(false) @map("is_client")
+  domain     String?
+  sourceType String   @default("competitor") @map("source_type")
+  domainType String?  @default("editorial") @map("domain_type")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@unique([runId, url, chunkId])
+  @@map("sandbox_chunks")
+}
+
+model SandboxRagResult {
+  id                        String          @id @default(cuid())
+  runId                     String          @map("run_id")
+  questionId                String          @map("question_id")
+  question                  String
+  answer                    String
+  didSandboxAppear          Boolean         @default(false) @map("did_sandbox_appear")
+  chunksUsed                Int             @default(0) @map("chunks_used")
+  confidence                Float?
+  competitorCitations       String[]        @map("competitor_citations")
+  sandboxCitations          String[]        @map("sandbox_citations")
+  businessCompetitorCitations String[]      @map("business_competitor_citations")
+  authoritySourceCitations  String[]       @map("authority_source_citations")
+  createdAt                 DateTime        @default(now()) @map("created_at")
+  run                       SandboxRun      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  questionRef               SandboxQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  metrics                   AnswerMetrics?
+
+  @@map("sandbox_rag_results")
+}
+
+model SandboxScore {
+  id                  String     @id @default(cuid())
+  runId               String     @unique @map("run_id")
+  geoScore            Float      @map("geo_score")
+  aeoScore            Float      @map("aeo_score")
+  citationRate        Float      @map("citation_rate")
+  coverage            Float?
+  competitorDominance Float?     @map("competitor_dominance")
+  missingContent      String[]   @map("missing_content")
+  schemaGaps          String[]   @map("schema_gaps")
+  structuredDataOps   String[]   @map("structured_data_ops")
+  recommendations     String[]
+  createdAt           DateTime   @default(now()) @map("created_at")
+  updatedAt           DateTime   @default(now()) @updatedAt @map("updated_at")
+  run                 SandboxRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@map("sandbox_scores")
+}
+
+model JobEvent {
+  id        String     @id @default(cuid())
+  eventId   String     @unique @map("event_id")
+  runId     String     @map("run_id")
+  step      String
+  status    String
+  payload   Json?
+  timestamp DateTime   @default(now())
+  run       SandboxRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId])
+  @@index([eventId])
+  @@map("job_events")
+}
+
+// ==========================================
+// Chat Interface Models
+// ==========================================
+
+model ChatSession {
+  id        String        @id @default(cuid())
+  userId    String        @map("user_id") // For v1: simple string, future: foreign key to User
+  title     String?       // Auto-generated from first message if null
+  scope     String        // "sandbox_only" | "sandbox_competitors" | "web_only"
+  runId     String?       @map("run_id") // Optional link to SandboxRun
+  createdAt DateTime      @default(now()) @map("created_at")
+  updatedAt DateTime      @default(now()) @updatedAt @map("updated_at")
+  deletedAt DateTime?     @map("deleted_at") // Soft delete
+  
+  messages  ChatMessage[]
+  run       SandboxRun?   @relation(fields: [runId], references: [id], onDelete: SetNull)
+  
+  @@index([userId, deletedAt])
+  @@index([runId])
+  @@map("chat_sessions")
+}
+
+model ChatMessage {
+  id        String         @id @default(cuid())
+  sessionId String         @map("session_id")
+  role      String         // "user" | "assistant"
+  content   String         // Message text
+  tokensIn  Int?           @map("tokens_in")
+  tokensOut Int?           @map("tokens_out")
+  modelUsed String?        @map("model_used") // "gemini-2.5-flash"
+  latencyMs Int?           @map("latency_ms") // Response latency in milliseconds
+  createdAt DateTime       @default(now()) @map("created_at")
+  
+  session   ChatSession    @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  citations ChatCitation[]
+  
+  @@index([sessionId, createdAt])
+  @@map("chat_messages")
+}
+
+model ChatCitation {
+  id             String      @id @default(cuid())
+  messageId      String      @map("message_id")
+  url            String
+  domainType     String?     @map("domain_type") // "sandbox_brand" | "business_competitor" | "editorial"
+  chunkId        Int?        @map("chunk_id")
+  relevanceScore Float?     @map("relevance_score")
+  createdAt      DateTime    @default(now()) @map("created_at")
+  
+  message        ChatMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  
+  @@index([messageId])
+  @@map("chat_citations")
+}
+
+model UsageLog {
+  id            String   @id @default(cuid())
+  userId       String   @map("user_id")
+  date         DateTime  @db.Date // Date only (no time)
+  tokensUsed   Int      @default(0) @map("tokens_used")
+  messagesCount Int     @default(0) @map("messages_count")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @default(now()) @updatedAt @map("updated_at")
+  
+  @@unique([userId, date])
+  @@index([userId, date])
+  @@map("usage_logs")
+}
+
+

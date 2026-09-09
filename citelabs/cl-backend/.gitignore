@@ -1,0 +1,35 @@
+# OS
+.DS_Store
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build outputs
+dist/
+build/
+coverage/
+.nyc_output/
+
+# Fastify/Logs
+logs/
+*.log
+
+# Tooling caches
+.turbo/
+.eslintcache
+.tsbuildinfo
+
+# Prisma
+# Keep migrations; ignore generated artifacts if any
+prisma/generated/
+
+

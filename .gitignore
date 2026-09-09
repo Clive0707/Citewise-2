@@ -1,0 +1,55 @@
+# OS / System files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Environment variables
+.env
+.env.*
+!.env.example
+!.env.template
+
+# Service account & credential keys
+citelabsv1-*.json
+*-key.json
+secrets.json
+
+# Dependencies
+node_modules/
+
+# Python environments & caches
+env/
+venv/
+.venv/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Build and output directories
+.next/
+dist/
+build/
+coverage/
+.nyc_output/
+.turbo/
+.eslintcache
+.tsbuildinfo
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
