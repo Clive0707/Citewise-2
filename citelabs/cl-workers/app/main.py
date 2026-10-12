@@ -169,6 +169,8 @@ class StartJobRequest(BaseModel):
     run_id: str
     url: HttpUrl
     model_name: Optional[str] = None
+    # Two-stage GEO seed (see async_job.run_full_job): mode "stage1" or "baseline"
+    seed: Optional[Dict[str, Any]] = None
 
 
 @app.post("/start-job")
@@ -180,9 +182,95 @@ async def start_job_endpoint(payload: StartJobRequest):
     import asyncio
 
     # Start job in background task
-    asyncio.create_task(async_job.run_full_job(payload.run_id, str(payload.url), payload.model_name))
+    from fastapi import HTTPException
+
+    seed = payload.seed
+    if seed is not None:
+        mode = seed.get("mode")
+        if mode not in ("stage1", "baseline"):
+            raise HTTPException(status_code=400, detail="seed.mode must be 'stage1' or 'baseline'")
+        if not seed.get("questions"):
+            raise HTTPException(status_code=400, detail="seed.questions is required")
+        if mode == "baseline" and not seed.get("source_pool"):
+            raise HTTPException(status_code=400, detail="seed.source_pool is required for a baseline seed")
+
+    asyncio.create_task(async_job.run_full_job(payload.run_id, str(payload.url), payload.model_name, seed))
 
     return {"message": "Job started", "run_id": payload.run_id}
+
+
+# ==========================================
+# Stage 1: Real-World Observation
+# ==========================================
+
+
+class Stage1StartRequest(BaseModel):
+    observation_id: str
+    url: HttpUrl
+    queries: Optional[List[str]] = None  # generated from the page when omitted
+    runs_per_query: Optional[int] = None  # overrides STAGE1_RUNS_PER_QUERY
+    query_count: Optional[int] = None  # overrides STAGE1_QUERY_COUNT
+    fetcher: Optional[str] = None  # overrides STAGE1_FETCHER: gemini_grounding | serpapi_aio
+    serpapi_gl: Optional[str] = None  # overrides STAGE1_SERPAPI_GL (serpapi_aio only)
+    serpapi_hl: Optional[str] = None  # overrides STAGE1_SERPAPI_HL
+    serpapi_device: Optional[str] = None  # overrides STAGE1_SERPAPI_DEVICE
+    skip_evidence: Optional[bool] = None  # overrides STAGE1_SKIP_EVIDENCE: observation-only run
+
+
+@app.post("/stage1/start")
+async def stage1_start_endpoint(payload: Stage1StartRequest):
+    """
+    Start a Stage 1 observation job in the background. The default fetcher is an
+    approximate proxy for Google AI Overview citations, not real AI Overview data.
+    """
+    import asyncio
+
+    from .observation.config import Stage1Config
+    from .observation.stage1_job import run_stage1_job
+
+    from fastapi import HTTPException
+
+    overrides = {
+        "runs_per_query": payload.runs_per_query,
+        "query_count": payload.query_count,
+        "fetcher": payload.fetcher,
+        "serpapi_gl": payload.serpapi_gl,
+        "serpapi_hl": payload.serpapi_hl,
+        "serpapi_device": payload.serpapi_device,
+        "skip_evidence": payload.skip_evidence,
+    }
+    try:
+        config = Stage1Config.from_env(overrides)  # reject invalid config before starting
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if config.fetcher == "serpapi_aio":
+        # Refuse a run the SerpApi account cannot pay for (the job checks again before fetching)
+        from .observation.fetchers import get_observation_fetcher
+        from .observation.serpapi_aio import SerpApiError
+
+        planned = (len([q for q in payload.queries if q.strip()]) if payload.queries else config.query_count) * config.runs_per_query
+        try:
+            await get_observation_fetcher(config.fetcher, config.grounding_model, config.serpapi_settings).preflight(planned)
+        except (SerpApiError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+    asyncio.create_task(
+        run_stage1_job(payload.observation_id, str(payload.url), payload.queries, overrides)
+    )
+    return {"message": "Stage 1 observation started", "observation_id": payload.observation_id}
+
+
+class CompareRequest(BaseModel):
+    before: Dict[str, Optional[float]]
+    after: Dict[str, Optional[float]]
+
+
+@app.post("/compare")
+async def compare_endpoint(payload: CompareRequest):
+    """Before/after deltas for two runs' stored metrics (GEO/AEO improvement)."""
+    from .geo_metrics import compare_run_metrics
+
+    return compare_run_metrics(payload.before, payload.after)
 
 
 # ==========================================

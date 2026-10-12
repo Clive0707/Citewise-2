@@ -208,7 +208,33 @@ export class Worker {
     return response.json();
   }
 
-  async startJob(payload: { run_id: string; url: string; model_name?: string }): Promise<void> {
+  async compare(payload: {
+    before: Record<string, number | null>;
+    after: Record<string, number | null>;
+  }): Promise<{
+    geo_improvement: number | null;
+    aeo_improvement: number | null;
+    deltas: Record<string, { before: number | null; after: number | null; delta: number | null }>;
+  }> {
+    const response = await fetch(`${this.baseUrl}/compare`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      throw new Error(
+        `Worker /compare request failed with status ${response.status}: ${errorBody || 'no body'}`,
+      );
+    }
+
+    return (await response.json()) as any;
+  }
+
+  async startJob(payload: { run_id: string; url: string; model_name?: string; seed?: unknown }): Promise<void> {
     const finalPayload = {
       ...payload,
       model_name: payload.model_name || DEFAULT_MODEL_NAME,
@@ -226,6 +252,34 @@ export class Worker {
       const errorBody = await response.text();
       throw new Error(
         `Worker /start-job request failed with status ${response.status}: ${errorBody || 'no body'}`,
+      );
+    }
+  }
+
+  async startStage1(payload: {
+    observation_id: string;
+    url: string;
+    queries?: string[];
+    runs_per_query?: number;
+    query_count?: number;
+    fetcher?: string;
+    serpapi_gl?: string;
+    serpapi_hl?: string;
+    serpapi_device?: string;
+    skip_evidence?: boolean;
+  }): Promise<void> {
+    const response = await fetch(`${this.baseUrl}/stage1/start`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      throw new Error(
+        `Worker /stage1/start request failed with status ${response.status}: ${errorBody || 'no body'}`,
       );
     }
   }

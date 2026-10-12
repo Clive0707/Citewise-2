@@ -30,6 +30,7 @@ from .chunkers.factory import get_chunker
 from .chunkers import Document as ChunkerDocument
 from .llm_providers.factory import get_llm_provider
 from .constants import get_model_for_step, get_model_for_role
+from .stage2_seed import tag_rag_result
 logger = logging.getLogger(__name__)
 
 # Backend URL for chunk persistence
@@ -2482,8 +2483,15 @@ async def crawl_and_store_competitors(
     # Extract just URLs for crawling
     urls = [comp["url"] for comp in competitor_list]
     
-    # Crawl competitors in parallel
-    competitor_tasks = [crawl.crawl_url(url) for url in urls]
+    # Crawl competitors in parallel, text only: crawl_url's LLM page summary was
+    # never used here, and a Stage 1-seeded pool can hold dozens of pages
+    crawl_sem = asyncio.Semaphore(int(os.getenv("STAGE2_CRAWL_CONCURRENCY", "8")))
+
+    async def _crawl(url: str) -> Dict[str, Any]:
+        async with crawl_sem:
+            return await crawl.crawl_text(url)
+
+    competitor_tasks = [_crawl(url) for url in urls]
     competitor_results = await asyncio.gather(*competitor_tasks, return_exceptions=True)
 
     competitors_data = []
@@ -2555,6 +2563,11 @@ async def crawl_and_store_competitors(
             "full_text": _sanitize_text(full_text),
             "source_type": source_type,  # Include source_type in competitor data
             "domain_type": comp_domain_type,  # P2: Include domain_type for database storage
+            # Two-stage GEO: category labels (Stage 1's when seeded)
+            "source_category": comp_info.get("source_category"),
+            "competitor_group": comp_info.get("competitor_group"),
+            "category_source": comp_info.get("category_source"),
+            "origin": comp_info.get("origin"),
         })
         
         # Chunk competitor content
@@ -2758,6 +2771,122 @@ def _chunk_text(text: str, url: str, is_client: bool, domain: Optional[str] = No
 # ==========================================
 
 
+# Phrases the RAG model uses when the retrieved context cannot answer the question
+_NO_INFO_PHRASES = (
+    "does not contain information",
+    "doesn't contain information",
+    "does not contain enough information",
+    "doesn't contain enough information",
+    "does not contain any information",
+    "not enough information",
+    "insufficient information",
+    "no information regarding",
+    "no information about",
+    "no information on",
+    "does not provide information",
+    "doesn't provide information",
+    "cannot answer",
+    "can't answer",
+    "unable to answer",
+)
+
+_CITATION_TAG_PATTERN = re.compile(r"\[Source:\s*([^\]]+)\]", re.IGNORECASE)
+_MAX_QUOTE_CHARS = 200
+_MAX_DIAGNOSED_SOURCES = 2
+
+
+def _claim_for_citation(answer: str, cited_url: str) -> Optional[str]:
+    """Return the answer sentence that a [Source:<cited_url>] tag is attached to."""
+    segments = _CITATION_TAG_PATTERN.split(answer)
+    # re.split with one group alternates: text, tag, text, tag, ...
+    for i in range(1, len(segments), 2):
+        if cited_url not in segments[i]:
+            continue
+        # Walk back over empty segments so "[Source:a][Source:b]" both map to the same claim
+        for j in range(i - 1, -1, -2):
+            text = segments[j].strip()
+            if not text:
+                continue
+            sentences = [s for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+            claim = sentences[-1].strip().lstrip("*-• ").strip() if sentences else ""
+            if claim:
+                if len(claim) > _MAX_QUOTE_CHARS:
+                    claim = claim[:_MAX_QUOTE_CHARS].rstrip() + "…"
+                return claim
+        return None
+    return None
+
+
+def _diagnose_rag_result(
+    did_sandbox_appear: bool,
+    answer: str,
+    sandbox_domain: str,
+    business_competitor_citations: List[str],
+    authority_source_citations: List[str],
+    final_chunks: List[Dict[str, Any]],
+) -> Dict[str, Optional[str]]:
+    """
+    Explain why the sandbox did not appear for a question. Purely deterministic: quotes
+    the answer and counts retrieved chunks, no LLM calls.
+
+    - competitor_advantage: at least one non-sandbox source (business competitor or
+      editorial) was cited, so the information existed in the pool but not from the sandbox.
+    - content_gap: no source was cited at all, so no crawled content answered the question.
+    - None: the sandbox appeared, no diagnosis needed.
+    """
+    if did_sandbox_appear:
+        return {"diagnosis_type": None, "diagnosis_detail": None}
+
+    total_chunks = len(final_chunks)
+    sandbox_chunks = 0
+    for chunk in final_chunks:
+        try:
+            chunk_domain = urlparse(chunk.get("url", "")).netloc.lower().replace("www.", "")
+        except Exception:
+            continue
+        if chunk_domain and chunk_domain == sandbox_domain:
+            sandbox_chunks += 1
+
+    if sandbox_chunks:
+        retrieval_note = (
+            f"{sandbox_chunks} of {total_chunks} retrieved chunks came from the sandbox but were not cited."
+        )
+    else:
+        retrieval_note = f"0 of {total_chunks} retrieved chunks came from the sandbox."
+
+    cited_sources = [("Business competitor", url) for url in business_competitor_citations] + [
+        ("Editorial source", url) for url in authority_source_citations
+    ]
+
+    if cited_sources:
+        parts = []
+        for label, url in cited_sources[:_MAX_DIAGNOSED_SOURCES]:
+            domain = urlparse(url).netloc.lower().replace("www.", "") or url
+            claim = _claim_for_citation(answer, url)
+            if claim:
+                parts.append(f'{label} {domain} supplied: "{claim}"')
+            else:
+                parts.append(f"{label} {domain} was cited")
+        detail = "; ".join(parts)
+        remaining = len(cited_sources) - _MAX_DIAGNOSED_SOURCES
+        if remaining > 0:
+            detail += f" (+{remaining} more source{'s' if remaining > 1 else ''})"
+        return {
+            "diagnosis_type": "competitor_advantage",
+            "diagnosis_detail": f"{detail}. {retrieval_note}",
+        }
+
+    answer_lower = (answer or "").lower()
+    if any(phrase in answer_lower for phrase in _NO_INFO_PHRASES):
+        gap_note = "No source was cited; the answer states the retrieved context lacks this information."
+    else:
+        gap_note = "No source was cited in the answer."
+    return {
+        "diagnosis_type": "content_gap",
+        "diagnosis_detail": f"{gap_note} {retrieval_note}",
+    }
+
+
 async def run_rag_simulation(
     run_id: str,
     questions: List[Dict[str, str]],
@@ -2767,9 +2896,13 @@ async def run_rag_simulation(
     competitor_urls: Optional[List[Dict[str, Any]]] = None,
     sandbox_brand_name: Optional[str] = None,
     model_name: Optional[str] = None,
+    source_categories: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Step 6: For each question, perform RAG simulation using RAG_ANSWERING model.
+
+    source_categories (domain -> (category, competitor group), from
+    stage2_seed.category_lookup) tags every cited and retrieved source.
     Now with business context injection for better grounding.
 
     Args:
@@ -2854,6 +2987,11 @@ async def run_rag_simulation(
                     "chunks_used": 0,
                     "competitor_citations": [],
                     "sandbox_citations": [],
+                    "diagnosis_type": "content_gap",
+                    "diagnosis_detail": "No content from any source was retrieved for this question.",
+                    "sandbox_citation_position": None,
+                    "cited_source_categories": [],
+                    "retrieved_source_categories": {},
                 })
                 continue
 
@@ -3105,6 +3243,21 @@ async def run_rag_simulation(
                 f"authority_citations={len(authority_source_citations)}"
             )
 
+            diagnosis = _diagnose_rag_result(
+                did_sandbox_appear=did_sandbox_appear,
+                answer=answer,
+                sandbox_domain=sandbox_domain,
+                business_competitor_citations=business_competitor_citations,
+                authority_source_citations=authority_source_citations,
+                final_chunks=final_chunks,
+            )
+            source_tags = tag_rag_result(
+                answer=answer,
+                sandbox_url=sandbox_url,
+                retrieved_chunk_urls=[c.get("url", "") for c in final_chunks],
+                lookup=source_categories or {},
+            )
+
             # CRITICAL: Citation arrays are FINALIZED here and become the source of truth.
             # These arrays are persisted to sandbox_rag_results table and MUST be trusted for analytics.
             # DO NOT reclassify or modify citations during retrieval - they are finalized at ingestion.
@@ -3119,7 +3272,10 @@ async def run_rag_simulation(
                 "sandbox_citations": sandbox_citations,  # FINAL - source of truth for analytics
                 "business_competitor_citations": business_competitor_citations,  # FINAL - source of truth for analytics
                 "authority_source_citations": authority_source_citations,  # FINAL - source of truth for analytics
-                "metrics": rag_metrics  # Store the full metrics dict
+                "metrics": rag_metrics,  # Store the full metrics dict
+                "diagnosis_type": diagnosis["diagnosis_type"],
+                "diagnosis_detail": diagnosis["diagnosis_detail"],
+                **source_tags,  # sandbox_citation_position, cited/retrieved source categories
             })
             #lets prinf a log which will print the rag_metrics 
             logger.info(f"[rag_metrics] question_id={question_id} rag_metrics={rag_metrics}")
